@@ -1,0 +1,101 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Hyprland has no stable plugin ABI, so a green build today says nothing
+  # about next week. Build weekly against whatever Hyprland Arch currently
+  # ships, so an upstream break surfaces here rather than on someone's desktop.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-format
+          # .clang-format is hyprwm/hyprland-plugins' own, so a contributor's
+          # patch lands looking like the rest of the ecosystem rather than like
+          # this repository specifically.
+          clang-format --dry-run -Werror src/*.cpp src/*.hpp
+
+  build:
+    name: build against Hyprland ${{ matrix.hyprland }}
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    strategy:
+      fail-fast: false
+      matrix:
+        # `current` is whatever Arch ships today. When a release breaks the
+        # plugin this is the job that goes red, and it goes red on a schedule
+        # rather than when a user tries to install.
+        hyprland: [current]
+
+    steps:
+      - name: Install Hyprland and headers
+        run: |
+          # Package names are the OWNERS of the .pc files the Makefile asks
+          # pkg-config for, not the pkg-config names themselves - the two
+          # differ for three of them and a wrong guess fails the whole job:
+          #   xkbcommon.pc -> libxkbcommon    libudev.pc -> systemd-libs
+          #   pixman-1.pc  -> pixman
+          # hyprland pulls in hyprutils/hyprlang/aquamarine as dependencies.
+          pacman -Syu --noconfirm --needed \
+            git pkgconf hyprland pixman libdrm libinput systemd-libs \
+            wayland libxkbcommon lua
+
+      - uses: actions/checkout@v4
+
+      - name: Report versions
+        run: |
+          pacman -Q hyprland hyprutils hyprlang
+          echo "hyprland pkg-config: $(pkg-config --modversion hyprland)"
+
+      - name: Build
+        run: make all
+
+      - name: Verify plugin exports
+        run: |
+          for sym in pluginAPIVersion pluginInit pluginExit; do
+            nm -D --defined-only hyprsummon.so | grep -q " T $sym\$" \
+              || { echo "::error::missing required export: $sym"; exit 1; }
+          done
+          echo "all required exports present"
+
+      - name: Verify every undefined symbol resolves
+        # A plugin that builds but references a symbol Hyprland does not export
+        # fails at dlopen, which on a user's machine means the compositor
+        # refuses to load it with no useful message. Catching it here is the
+        # difference between a red CI run and a bad afternoon.
+        run: |
+          pacman -S --noconfirm --needed python
+          python3 - <<'PY'
+          import subprocess, sys, shutil
+          hl = shutil.which("Hyprland") or "/usr/bin/Hyprland"
+          def syms(cmd):
+              out = subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
+              return {s.split('@')[0] for s in out.split()}
+          undef   = syms("nm -D -u hyprsummon.so | awk '{print $NF}'")
+          defined = syms(f"nm -D --defined-only {hl} | awk '{{print $NF}}'")
+          libs = subprocess.run(f"ldd {hl} | awk '{{print $3}}'", shell=True,
+                                capture_output=True, text=True).stdout.split()
+          for l in libs:
+              if l.startswith('/'):
+                  defined |= syms(f"nm -D --defined-only {l} 2>/dev/null | awk '{{print $NF}}'")
+          # Weak/optional symbols the linker fills in itself.
+          ignore = {'_ITM_deregisterTMCloneTable', '_ITM_registerTMCloneTable', '__gmon_start__'}
+          missing = sorted(undef - defined - ignore)
+          if missing:
+              print("::error::unresolved symbols, this would fail at dlopen:")
+              for m in missing[:20]:
+                  print("   ", subprocess.run(['c++filt', m], capture_output=True, text=True).stdout.strip())
+              sys.exit(1)
+          print(f"all {len(undef)} undefined symbols resolve")
+          PY

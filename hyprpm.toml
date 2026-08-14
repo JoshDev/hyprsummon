@@ -1,0 +1,31 @@
+[repository]
+name = "hyprsummon"
+authors = ["JoshDev"]
+
+# No commit_pins yet.
+#
+# A pin maps a Hyprland commit to the plugin commit known to work with it:
+#
+#   commit_pins = [
+#       ["<hyprland commit>", "<plugin commit>"],  # 0.57.0
+#   ]
+#
+# hyprpm checks the running compositor against the left column and, on a match,
+# resets the plugin to the right one before building. With no pins it simply
+# builds the default branch, which is what happens today and works - a missing
+# pin means "the author has not blessed a specific pair", not "this will not
+# run". hy3 shipped for weeks with a pin two releases behind and ran fine.
+#
+# Add the first one after the next Hyprland release: build against it, confirm
+# the plugin loads, then append the pair. The Hyprland commit is the `at commit`
+# field of `hyprctl version`. A pin MUST reference a commit that still exists -
+# rewriting history out from under one leaves hyprpm doing `git reset --hard` to
+# a dead SHA, which fails the install outright.
+
+[hyprsummon]
+description = "Lazy-launching, monitor-aware scratchpads"
+authors = ["JoshDev"]
+output = "hyprsummon.so"
+build = [
+    "make all",
+]
