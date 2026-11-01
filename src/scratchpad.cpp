@@ -4,14 +4,15 @@
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/config/shared/actions/ConfigActions.hpp>
 #include <hyprland/src/config/supplementary/executor/Executor.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
 #include <hyprland/src/desktop/state/GlobalWindowController.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/helpers/MiscFunctions.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/state/WorkspaceState.hpp>
+#include <hyprland/src/workspace/WorkspaceUtils.hpp>
 
 #include <hyprutils/utils/ScopeGuard.hpp>
 
@@ -35,27 +36,34 @@ static SDispatchResult fail(std::string msg) {
 }
 
 // Keyed by workspace NAME, not id: a special workspace is destroyed with its
-// last window and returns with a fresh id.
+// last window and returns with a fresh id. Since Hyprland 0.57 the name is the
+// workspace's addressable name ("special:<name>"), and special-ness is its type
+// rather than a flag.
 static SScratchpad* padForWorkspace(const PHLWORKSPACE& ws) {
-    if (!ws || !ws->m_isSpecialWorkspace || !ws->m_name.starts_with(SPECIAL_PREFIX))
+    if (!ws || ws->type() != Workspace::eWorkspaceType::SPECIAL)
         return nullptr;
 
-    const auto IT = g_pGlobalState->pads.find(ws->m_name.substr(strlen(SPECIAL_PREFIX)));
+    const auto& ADDRESS = ws->addressableName();
+    if (!ADDRESS.starts_with(SPECIAL_PREFIX))
+        return nullptr;
+
+    const auto IT = g_pGlobalState->pads.find(ADDRESS.substr(strlen(SPECIAL_PREFIX)));
     return IT == g_pGlobalState->pads.end() ? nullptr : &IT->second;
 }
 
-// Resolve "special:<name>", creating it if absent. getWorkspaceIDNameFromString
-// returns an existing id or allocates one, so create() only runs for the latter.
-static PHLWORKSPACE resolveWorkspace(const std::string& name, const PHLMONITOR& monitor) {
-    const auto& [ID, WSNAME, IS_AUTO] = getWorkspaceIDNameFromString(std::string{SPECIAL_PREFIX} + name);
+// Resolve "special:<name>", creating it if absent. `created` reports which, so
+// the caller can call ready() on a new workspace AFTER showing it - 0.57 wants
+// a workspace moved or focused before ready() fires its creation events.
+static PHLWORKSPACE resolveWorkspace(const std::string& name, const PHLMONITOR& monitor, bool& created) {
+    const auto ADDRESS = Workspace::specialWorkspaceAddressFromName(name);
+    created            = false;
 
-    if (ID == WORKSPACE_INVALID || !State::workspaceState()->isSpecial(ID))
-        return nullptr;
-
-    if (auto ws = State::workspaceState()->query().id(ID).run())
+    if (auto ws = State::workspaceState()->query().address(ADDRESS).run())
         return ws;
 
-    return State::workspaceState()->create(ID, monitor->m_id, WSNAME);
+    auto ws = State::workspaceState()->createSpecial(ADDRESS, monitor);
+    created = !!ws;
+    return ws;
 }
 
 // Size and centre a pad's floating windows against the monitor showing it.
@@ -73,7 +81,7 @@ static void applyGeometry(const PHLWORKSPACE& ws, const PHLMONITOR& monitor, con
 
     for (auto const& w : Desktop::windowState()->windows()) {
         // Tiled windows belong to the layout.
-        if (!w || w->m_workspace != ws || !w->m_isMapped || !w->m_isFloating)
+        if (!w || w->m_workspace != ws || !w->mapped() || !w->isFloating())
             continue;
 
         // Best effort: these refuse on a fullscreen window, deliberately.
@@ -115,9 +123,16 @@ SDispatchResult Summon::dispatch(std::string arg) {
     if (!PMONITOR)
         return fail("summon: no focused monitor");
 
-    const auto WS = resolveWorkspace(name, PMONITOR);
+    bool       created = false;
+    const auto WS      = resolveWorkspace(name, PMONITOR, created);
     if (!WS)
         return fail("summon: could not resolve special workspace for \"" + name + "\"");
+
+    // Runs on every return below, after the workspace has been shown.
+    Hyprutils::Utils::CScopeGuard readyGuard([&] {
+        if (created)
+            WS->ready();
+    });
 
     // Empty pad: lazy launch. This is the case togglespecialworkspace cannot
     // serve - it shows an empty workspace and leaves you there.
@@ -175,7 +190,7 @@ void Summon::onWindowOpen(PHLWINDOW window) {
 
     pad->launchPid = 0;
 
-    if (pad->makeFloating && !window->m_isFloating)
+    if (pad->makeFloating && !window->isFloating())
         std::ignore = Config::Actions::floatWindow(Config::Actions::TOGGLE_ACTION_ENABLE, window);
 
     const auto PMONITOR = window->m_monitor.lock() ? window->m_monitor.lock() : Desktop::focusState()->monitor();

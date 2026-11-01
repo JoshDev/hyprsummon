@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1
+
+- Build against Hyprland 0.57, which moved workspaces out of `desktop/` into
+  `workspace/` and replaced the id-based special-workspace API: pads now resolve
+  by address (`special:<name>`) through `query().address()` and are created with
+  `createSpecial()`, special-ness comes from the workspace type, and a newly
+  created pad gets `ready()` after it is shown. Window flags moved to
+  `mapped()` and `isFloating()`.
+
 ## 0.1.0
 
 First release.

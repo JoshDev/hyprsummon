@@ -137,7 +137,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     HyprlandAPI::reloadConfig();
 
-    return {"hyprsummon", "Lazy-launching, monitor-aware scratchpads for Hyprland", "JoshDev", "0.1.0"};
+    return {"hyprsummon", "Lazy-launching, monitor-aware scratchpads for Hyprland", "JoshDev", "0.1.1"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
